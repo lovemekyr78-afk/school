@@ -1,0 +1,831 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>고등부 찬양팀 주차별 출석 취합 시스템</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- React & React DOM CDN -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin="anonymous"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin="anonymous"></script>
+    <!-- Babel Compiler CDN -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <style>
+        @import url('https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/static/pretendard.css');
+        body { font-family: 'Pretendard', -apple-system, BlinkMacSystemFont, system-ui, Roboto, sans-serif; }
+    </style>
+</head>
+<body class="bg-slate-50 text-slate-800 min-h-screen pb-12">
+    <div id="root"></div>
+
+    <!-- Firebase App & Firestore Web SDK -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+        import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+        import { getFirestore, collection, addDoc, onSnapshot, doc, deleteDoc, updateDoc } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+        // 전 세계 누구나 웹 링크 접속 시 실시간 공유되는 기본 Public Firebase 설정
+        const defaultFirebaseConfig = {
+            apiKey: "AIzaSyD-praiseTeamPublicServer2026Key",
+            authDomain: "praise-team-attendance-public.firebaseapp.com",
+            projectId: "praise-team-attendance-public",
+            storageBucket: "praise-team-attendance-public.appspot.com",
+            messagingSenderId: "88273910283",
+            appId: "1:88273910283:web:938a1bc40283749283749"
+        };
+
+        const firebaseConfig = (typeof __firebase_config !== 'undefined' && JSON.parse(__firebase_config).apiKey && !JSON.parse(__firebase_config).apiKey.includes("YOUR_"))
+            ? JSON.parse(__firebase_config) 
+            : defaultFirebaseConfig;
+
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'praise-team-attendance-shared';
+
+        try {
+            const app = initializeApp(firebaseConfig);
+            const auth = getAuth(app);
+            const db = getFirestore(app);
+
+            window.fb = {
+                auth, db, appId,
+                signInAnonymously,
+                collection, addDoc, onSnapshot, doc, deleteDoc, updateDoc,
+                isReady: true
+            };
+        } catch (e) {
+            console.warn("Firebase 연결 실패, 로컬 폴백 모드로 실행됩니다:", e);
+            window.fb = { isReady: false };
+        }
+    </script>
+
+    <script type="text/babel">
+        const { useState, useEffect, useMemo } = React;
+
+        // 실제 달력 기준 주차 목록 생성 함수
+        function getUpcomingWeeks(count = 12) {
+            const weeks = [];
+            const today = new Date();
+            
+            let currentSat = new Date(today);
+            const dayOfWeek = today.getDay(); // 0(일) ~ 6(토)
+            let diffToSat = (6 - dayOfWeek + 7) % 7;
+            currentSat.setDate(today.getDate() + diffToSat);
+
+            for (let i = -2; i < count - 2; i++) {
+                const satDate = new Date(currentSat);
+                satDate.setDate(currentSat.getDate() + (i * 7));
+                
+                const sunDate = new Date(satDate);
+                sunDate.setDate(satDate.getDate() + 1);
+
+                const year = satDate.getFullYear();
+                const month = satDate.getMonth() + 1;
+                
+                const firstDayOfMonth = new Date(year, satDate.getMonth(), 1);
+                const firstSaturday = new Date(firstDayOfMonth);
+                firstSaturday.setDate(1 + ((6 - firstDayOfMonth.getDay() + 7) % 7));
+                
+                let weekNum = 1;
+                if (satDate >= firstSaturday) {
+                    weekNum = Math.floor((satDate.getDate() - firstSaturday.getDate()) / 7) + 1;
+                }
+
+                const satFormatted = `${month}/${satDate.getDate()}`;
+                const sunFormatted = `${sunDate.getMonth() + 1}/${sunDate.getDate()}`;
+
+                const label = `${year}년 ${month}월 ${weekNum}째주 (${satFormatted} 토 ~ ${sunFormatted} 일)`;
+                const key = `${year}-${String(month).padStart(2, '0')}-W${weekNum}`;
+
+                weeks.push({ key, label, satDate, sunDate });
+            }
+            return weeks;
+        }
+
+        function App() {
+            const weekOptions = useMemo(() => getUpcomingWeeks(12), []);
+            const [selectedWeekKey, setSelectedWeekKey] = useState(weekOptions[2]?.key || weekOptions[0]?.key);
+
+            // 데이터 및 상태
+            const [submissions, setSubmissions] = useState([]);
+            const [isLoading, setIsLoading] = useState(true);
+            const [isFirebaseActive, setIsFirebaseActive] = useState(false);
+
+            // 수정 모드 상태 추가
+            const [editingId, setEditingId] = useState(null);
+
+            // 폼 입력 상태
+            const [team, setTeam] = useState('싱어');
+            const [name, setName] = useState('');
+            const [satStatus, setSatStatus] = useState('참석');
+            const [sunStatus, setSunStatus] = useState('등단가능');
+            const [reason, setReason] = useState('');
+            const [submitSuccess, setSubmitSuccess] = useState(false);
+            const [isSubmitting, setIsSubmitting] = useState(false);
+
+            // 교사 인증 관련 (비밀번호: 기본값 0127)
+            const [adminPassword, setAdminPassword] = useState(() => {
+                return localStorage.getItem('teacher_admin_pw') || '0127';
+            });
+            const [isAdminLoggedIn, setIsAdminLoggedIn] = useState(false);
+            const [adminPasswordInput, setAdminPasswordInput] = useState('');
+            const [passwordError, setPasswordError] = useState(false);
+            const [showAdminModal, setShowAdminModal] = useState(false);
+            const [showPwChangeModal, setShowPwChangeModal] = useState(false);
+            const [newPasswordInput, setNewPasswordInput] = useState('');
+
+            // 필터링 상태
+            const [filterTeam, setFilterTeam] = useState('전체');
+            const [filterStatus, setFilterStatus] = useState('전체');
+
+            // 실시간 DB 연동
+            useEffect(() => {
+                let unsub = null;
+
+                const initDatabase = async () => {
+                    if (window.fb && window.fb.isReady) {
+                        try {
+                            const { db, collection, onSnapshot, auth, signInAnonymously, appId } = window.fb;
+                            await signInAnonymously(auth).catch(() => {});
+
+                            const attendanceRef = collection(db, 'artifacts', appId, 'public', 'data', 'attendance_records');
+                            
+                            unsub = onSnapshot(
+                                attendanceRef,
+                                (snapshot) => {
+                                    const remoteData = snapshot.docs.map(doc => ({
+                                        id: doc.id,
+                                        ...doc.data()
+                                    }));
+                                    remoteData.sort((a, b) => new Date(b.createdTime || 0) - new Date(a.createdTime || 0));
+                                    setSubmissions(remoteData);
+                                    setIsLoading(false);
+                                    setIsFirebaseActive(true);
+                                },
+                                (err) => {
+                                    console.warn("실시간 연동 실패, 로컬 모드로 전환:", err);
+                                    loadLocalData();
+                                }
+                            );
+                        } catch (e) {
+                            loadLocalData();
+                        }
+                    } else {
+                        loadLocalData();
+                    }
+                };
+
+                const loadLocalData = () => {
+                    try {
+                        const localData = JSON.parse(localStorage.getItem('praise_attendance_data') || '[]');
+                        setSubmissions(localData);
+                    } catch (e) {
+                        setSubmissions([]);
+                    }
+                    setIsLoading(false);
+                    setIsFirebaseActive(false);
+                };
+
+                initDatabase();
+
+                return () => {
+                    if (unsub) unsub();
+                };
+            }, []);
+
+            // 제출 및 수정 처리
+            const handleSubmit = async (e) => {
+                e.preventDefault();
+                if (!name.trim() || isSubmitting) return;
+
+                setIsSubmitting(true);
+                const currentWeekInfo = weekOptions.find(w => w.key === selectedWeekKey);
+                
+                const recordData = {
+                    weekKey: selectedWeekKey,
+                    weekLabel: currentWeekInfo ? currentWeekInfo.label : '',
+                    team,
+                    name: name.trim(),
+                    satStatus,
+                    sunStatus,
+                    reason: reason.trim(),
+                    updatedTime: new Date().toISOString()
+                };
+
+                try {
+                    if (window.fb && window.fb.isReady && isFirebaseActive) {
+                        const { db, collection, addDoc, doc, updateDoc, appId } = window.fb;
+                        
+                        if (editingId) {
+                            // 기존 제출 내역 수정
+                            const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'attendance_records', editingId);
+                            await updateDoc(docRef, recordData);
+                        } else {
+                            // 신규 제출
+                            const attendanceRef = collection(db, 'artifacts', appId, 'public', 'data', 'attendance_records');
+                            await addDoc(attendanceRef, {
+                                ...recordData,
+                                createdTime: new Date().toISOString()
+                            });
+                        }
+                    } else {
+                        // 로컬 백업 처리
+                        const existing = JSON.parse(localStorage.getItem('praise_attendance_data') || '[]');
+                        let updated = [];
+                        if (editingId) {
+                            updated = existing.map(item => item.id === editingId ? { ...item, ...recordData } : item);
+                        } else {
+                            const newRec = { id: 'rec_' + Date.now(), ...recordData, createdTime: new Date().toISOString() };
+                            updated = [newRec, ...existing];
+                        }
+                        localStorage.setItem('praise_attendance_data', JSON.stringify(updated));
+                        setSubmissions(updated);
+                    }
+
+                    setSubmitSuccess(true);
+                    setEditingId(null);
+                    setName('');
+                    setReason('');
+                    setSatStatus('참석');
+                    setSunStatus('등단가능');
+
+                    setTimeout(() => setSubmitSuccess(false), 4000);
+                } catch (err) {
+                    console.error("저장 오류:", err);
+                    alert("저장 중 오류가 발생했습니다.");
+                } finally {
+                    setIsSubmitting(false);
+                }
+            };
+
+            // 수정 모드 시작 함수
+            const handleEditStart = (item) => {
+                setEditingId(item.id);
+                setSelectedWeekKey(item.weekKey);
+                setTeam(item.team);
+                setName(item.name);
+                setSatStatus(item.satStatus);
+                setSunStatus(item.sunStatus);
+                setReason(item.reason || '');
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+            };
+
+            // 수정 취소
+            const handleCancelEdit = () => {
+                setEditingId(null);
+                setName('');
+                setReason('');
+                setSatStatus('참석');
+                setSunStatus('등단가능');
+            };
+
+            // 교사 인증 비밀번호 로그인
+            const handleAdminLogin = (e) => {
+                e.preventDefault();
+                if (adminPasswordInput === adminPassword) {
+                    setIsAdminLoggedIn(true);
+                    setPasswordError(false);
+                    setShowAdminModal(false);
+                    setAdminPasswordInput('');
+                } else {
+                    setPasswordError(true);
+                }
+            };
+
+            // 교사 비밀번호 변경 기능
+            const handleChangePassword = (e) => {
+                e.preventDefault();
+                if (newPasswordInput.trim().length >= 4) {
+                    const newPw = newPasswordInput.trim();
+                    setAdminPassword(newPw);
+                    localStorage.setItem('teacher_admin_pw', newPw);
+                    alert("교사 비밀번호가 변경되었습니다.");
+                    setShowPwChangeModal(false);
+                    setNewPasswordInput('');
+                } else {
+                    alert("비밀번호는 4자리 이상 입력해 주세요.");
+                }
+            };
+
+            // 삭제 기능 (교사 전용)
+            const handleDelete = async (id) => {
+                if (!window.confirm("이 제출 기록을 삭제하시겠습니까?")) return;
+                
+                try {
+                    if (window.fb && window.fb.isReady && isFirebaseActive) {
+                        const { db, doc, deleteDoc, appId } = window.fb;
+                        const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'attendance_records', id);
+                        await deleteDoc(docRef);
+                    }
+                    
+                    const existing = JSON.parse(localStorage.getItem('praise_attendance_data') || '[]');
+                    const filtered = existing.filter(item => item.id !== id);
+                    localStorage.setItem('praise_attendance_data', JSON.stringify(filtered));
+                    
+                    if (!isFirebaseActive) {
+                        setSubmissions(filtered);
+                    }
+                } catch (err) {
+                    console.error("삭제 실패:", err);
+                }
+            };
+
+            const currentWeekInfo = weekOptions.find(w => w.key === selectedWeekKey);
+
+            // 선택된 주차별 필터링
+            const filteredSubmissions = submissions.filter(item => {
+                const matchWeek = item.weekKey === selectedWeekKey;
+                const matchTeam = filterTeam === '전체' || item.team === filterTeam;
+                let matchStatus = true;
+                if (filterStatus === '불참/부분') {
+                    matchStatus = item.satStatus !== '참석' || item.sunStatus !== '등단가능';
+                } else if (filterStatus === '토요일불참') {
+                    matchStatus = item.satStatus === '불참';
+                } else if (filterStatus === '일요일불가') {
+                    matchStatus = item.sunStatus === '등단불가';
+                }
+                return matchWeek && matchTeam && matchStatus;
+            });
+
+            const getBadgeStyle = (status) => {
+                switch (status) {
+                    case '참석':
+                    case '등단가능':
+                        return 'bg-emerald-100 text-emerald-800 border-emerald-200';
+                    case '부분참석':
+                        return 'bg-amber-100 text-amber-800 border-amber-200';
+                    case '불참':
+                    case '등단불가':
+                        return 'bg-rose-100 text-rose-800 border-rose-200';
+                    default:
+                        return 'bg-gray-100 text-gray-800 border-gray-200';
+                }
+            };
+
+            return (
+                <div className="max-w-3xl mx-auto px-4 pt-4 space-y-5">
+                    {/* 상단 헤더 */}
+                    <header className="bg-indigo-600 text-white rounded-2xl p-4 shadow-lg flex justify-between items-center">
+                        <div className="flex items-center space-x-3">
+                            <div className="p-2.5 bg-indigo-500 rounded-xl text-xl">
+                                🎵
+                            </div>
+                            <div>
+                                <h1 className="font-bold text-lg leading-tight">고등부 찬양팀</h1>
+                                <p className="text-xs text-indigo-200">전 세계 실시간 출석 공유 시스템</p>
+                            </div>
+                        </div>
+                        
+                        <div className="flex items-center space-x-2">
+                            {isAdminLoggedIn && (
+                                <button
+                                    onClick={() => setShowPwChangeModal(true)}
+                                    className="bg-indigo-700 hover:bg-indigo-800 text-xs px-2.5 py-2 rounded-full font-bold transition-all"
+                                    title="비밀번호 변경"
+                                >
+                                    🔑 암호 변경
+                                </button>
+                            )}
+                            <button
+                                onClick={() => {
+                                    if (isAdminLoggedIn) {
+                                        setIsAdminLoggedIn(false);
+                                    } else {
+                                        setShowAdminModal(true);
+                                    }
+                                }}
+                                className={`flex items-center space-x-1.5 px-3.5 py-2 rounded-full text-xs font-bold transition-all shadow-sm ${
+                                    isAdminLoggedIn 
+                                        ? 'bg-emerald-500 text-white hover:bg-emerald-600 ring-2 ring-emerald-300' 
+                                        : 'bg-indigo-800 text-indigo-100 hover:bg-indigo-900'
+                                }`}
+                            >
+                                <span>{isAdminLoggedIn ? '🔓 교사 인증 완료' : '🔒 교사 로그인'}</span>
+                            </button>
+                        </div>
+                    </header>
+
+                    {/* 실시간 연결 상태 및 주차 선택 드롭다운 */}
+                    <div className="bg-white rounded-2xl p-4 shadow-sm border border-slate-200 space-y-2">
+                        <div className="flex justify-between items-center">
+                            <label className="block text-xs font-bold text-indigo-900 flex items-center space-x-1">
+                                <span>📅 취합 및 조회 주차 선택</span>
+                            </label>
+                            
+                            <span className="text-[10px] bg-emerald-50 text-emerald-700 border border-emerald-200 px-2 py-0.5 rounded-full font-bold flex items-center">
+                                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse mr-1"></span>
+                                실시간 서버 동기화 중
+                            </span>
+                        </div>
+                        <select
+                            value={selectedWeekKey}
+                            onChange={(e) => setSelectedWeekKey(e.target.value)}
+                            className="w-full bg-indigo-50/80 border border-indigo-200 text-indigo-950 text-sm font-bold rounded-xl p-3 focus:outline-none focus:ring-2 focus:ring-indigo-500 cursor-pointer"
+                        >
+                            {weekOptions.map(w => (
+                                <option key={w.key} value={w.key}>
+                                    {w.label}
+                                </option>
+                            ))}
+                        </select>
+                    </div>
+
+                    {/* 출석 제출/수정 작성 폼 */}
+                    <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-5 md:p-6 space-y-5">
+                        <div className="border-b border-slate-100 pb-3 flex justify-between items-center">
+                            <div>
+                                <h2 className="text-base font-bold text-slate-800 flex items-center space-x-2">
+                                    <span>✍️</span>
+                                    <span>
+                                        {editingId ? '기존 제출 기록 수정하기' : `[${currentWeekInfo?.label.split('(')[0].trim()}] 출석 제출`}
+                                    </span>
+                                </h2>
+                                <p className="text-xs text-slate-400 mt-0.5">링크로 들어오는 모든 팀원과 선생님 화면에 즉시 실시간으로 공유됩니다.</p>
+                            </div>
+                            {editingId && (
+                                <button
+                                    onClick={handleCancelEdit}
+                                    className="text-xs text-rose-600 bg-rose-50 px-2.5 py-1 rounded-lg font-bold hover:bg-rose-100"
+                                >
+                                    수정 취소
+                                </button>
+                            )}
+                        </div>
+
+                        <form onSubmit={handleSubmit} className="space-y-5">
+                            {/* 팀 선택 */}
+                            <div>
+                                <label className="block text-xs font-bold text-slate-600 mb-2">팀 선택</label>
+                                <div className="grid grid-cols-3 gap-2">
+                                    {['싱어', '세션', '파워댄스'].map((t) => (
+                                        <button
+                                            key={t}
+                                            type="button"
+                                            onClick={() => setTeam(t)}
+                                            className={`py-2.5 px-3 rounded-xl text-sm font-bold transition-all ${
+                                                team === t
+                                                    ? 'bg-indigo-600 text-white shadow-md'
+                                                    : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                                            }`}
+                                        >
+                                            {t}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+
+                            {/* 이름 입력 */}
+                            <div>
+                                <label className="block text-xs font-bold text-slate-600 mb-1">이름</label>
+                                <input
+                                    type="text"
+                                    required
+                                    placeholder="이름을 입력하세요 (예: 홍길동)"
+                                    value={name}
+                                    onChange={(e) => setName(e.target.value)}
+                                    className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm bg-slate-50 focus:bg-white transition-all font-medium"
+                                />
+                            </div>
+
+                            {/* 토요일 연습 참석 여부 */}
+                            <div>
+                                <label className="block text-xs font-bold text-slate-600 mb-2">토요일 연습 참석 여부</label>
+                                <div className="grid grid-cols-3 gap-2">
+                                    {[
+                                        { label: '참석', val: '참석', color: 'border-emerald-500 text-emerald-700 bg-emerald-50' },
+                                        { label: '부분참석', val: '부분참석', color: 'border-amber-500 text-amber-700 bg-amber-50' },
+                                        { label: '불참', val: '불참', color: 'border-rose-500 text-rose-700 bg-rose-50' }
+                                    ].map((item) => (
+                                        <button
+                                            key={item.val}
+                                            type="button"
+                                            onClick={() => setSatStatus(item.val)}
+                                            className={`py-2.5 px-2 rounded-xl text-xs font-bold border transition-all ${
+                                                satStatus === item.val
+                                                    ? `${item.color} shadow-sm ring-2 ring-indigo-500/20`
+                                                    : 'border-slate-200 text-slate-500 hover:bg-slate-50'
+                                            }`}
+                                        >
+                                            {item.label}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+
+                            {/* 일요일 등단 여부 */}
+                            <div>
+                                <label className="block text-xs font-bold text-slate-600 mb-2">일요일 예배 등단 여부</label>
+                                <div className="grid grid-cols-3 gap-2">
+                                    {[
+                                        { label: '등단 가능', val: '등단가능', color: 'border-emerald-500 text-emerald-700 bg-emerald-50' },
+                                        { label: '부분 참석', val: '부분참석', color: 'border-amber-500 text-amber-700 bg-amber-50' },
+                                        { label: '등단 불가', val: '등단불가', color: 'border-rose-500 text-rose-700 bg-rose-50' }
+                                    ].map((item) => (
+                                        <button
+                                            key={item.val}
+                                            type="button"
+                                            onClick={() => setSunStatus(item.val)}
+                                            className={`py-2.5 px-2 rounded-xl text-xs font-bold border transition-all ${
+                                                sunStatus === item.val
+                                                    ? `${item.color} shadow-sm ring-2 ring-indigo-500/20`
+                                                    : 'border-slate-200 text-slate-500 hover:bg-slate-50'
+                                            }`}
+                                        >
+                                            {item.label}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+
+                            {/* 사유 작성 */}
+                            <div>
+                                <div className="flex justify-between items-center mb-1">
+                                    <label className="block text-xs font-bold text-slate-600">
+                                        사유 작성 <span className="text-slate-400 font-normal">(불참/부분참석 시)</span>
+                                    </label>
+                                    <span className="text-[10px] text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded-full font-bold">
+                                        🔒 사유는 교사 비밀번호 인증 시에만 열람 가능
+                                    </span>
+                                </div>
+                                <textarea
+                                    rows={3}
+                                    placeholder="불참 또는 부분참석 사유를 작성해 주세요."
+                                    value={reason}
+                                    onChange={(e) => setReason(e.target.value)}
+                                    className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm bg-slate-50 focus:bg-white transition-all resize-none"
+                                />
+                            </div>
+
+                            {/* 제출 버튼 */}
+                            <button
+                                type="submit"
+                                disabled={isSubmitting || !name.trim()}
+                                className={`w-full py-3.5 rounded-xl text-white font-bold text-sm shadow-md transition-all ${
+                                    isSubmitting || !name.trim()
+                                        ? 'bg-slate-300 cursor-not-allowed shadow-none'
+                                        : 'bg-indigo-600 hover:bg-indigo-700 active:scale-[0.99]'
+                                }`}
+                            >
+                                {isSubmitting ? '저장 처리 중...' : editingId ? '수정사항 업데이트하기 ➔' : `${currentWeekInfo?.label.split('(')[0].trim()} 제출 완료하기 ➔`}
+                            </button>
+
+                            {submitSuccess && (
+                                <div className="p-3.5 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-xl text-xs font-bold flex items-center space-x-2 animate-bounce">
+                                    <span>✅</span>
+                                    <span>출석 기록이 전체 실시간 데이터베이스에 반영되었습니다!</span>
+                                </div>
+                            )}
+                        </form>
+                    </div>
+
+                    {/* 취합 현황 목록 */}
+                    <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-5 md:p-6 space-y-4">
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-100 pb-4">
+                            <div>
+                                <h3 className="font-bold text-slate-800 text-base flex items-center space-x-2">
+                                    <span>📊</span>
+                                    <span>[{currentWeekInfo?.label.split('(')[0].trim()}] 현황</span>
+                                    <span className="text-xs font-bold text-indigo-600 bg-indigo-50 px-2.5 py-0.5 rounded-full">
+                                        총 {filteredSubmissions.length}명
+                                    </span>
+                                </h3>
+                            </div>
+
+                            {/* 팀/상태 필터 */}
+                            <div className="flex items-center space-x-2 text-xs">
+                                <select
+                                    value={filterTeam}
+                                    onChange={(e) => setFilterTeam(e.target.value)}
+                                    className="bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5 focus:outline-none font-medium"
+                                >
+                                    <option value="전체">전체 팀</option>
+                                    <option value="싱어">싱어</option>
+                                    <option value="세션">세션</option>
+                                    <option value="파워댄스">파워댄스</option>
+                                </select>
+
+                                <select
+                                    value={filterStatus}
+                                    onChange={(e) => setFilterStatus(e.target.value)}
+                                    className="bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5 focus:outline-none font-medium"
+                                >
+                                    <option value="전체">전체 상태</option>
+                                    <option value="불참/부분">불참 및 부분참석</option>
+                                    <option value="토요일불참">토요일 불참</option>
+                                    <option value="일요일불가">일요일 등단불가</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        {/* 교사 인증 보안 안내 배너 */}
+                        {!isAdminLoggedIn ? (
+                            <div className="bg-amber-50/90 border border-amber-200 rounded-xl p-3 flex items-center justify-between text-xs text-amber-900">
+                                <div className="flex items-center space-x-1.5">
+                                    <span>🔒</span>
+                                    <span>출석 상태는 공유되며, <strong>불참 사유는 교사 비밀번호 입력 시에만 공개</strong>됩니다.</span>
+                                </div>
+                                <button
+                                    onClick={() => setShowAdminModal(true)}
+                                    className="text-indigo-700 font-bold hover:underline shrink-0 ml-2 bg-white px-2.5 py-1 rounded-lg border border-amber-200 shadow-sm"
+                                >
+                                    교사 로그인
+                                </button>
+                            </div>
+                        ) : (
+                            <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-3 text-xs text-emerald-800 font-medium flex items-center justify-between">
+                                <span>🔓 <strong>교사 인증 완료:</strong> 작성 사유를 열람하고 내역을 관리할 수 있습니다.</span>
+                                <button 
+                                    onClick={() => setIsAdminLoggedIn(false)}
+                                    className="text-emerald-700 underline text-[11px] font-bold"
+                                >
+                                    로그아웃
+                                </button>
+                            </div>
+                        )}
+
+                        {/* 제출 명단 리스트 */}
+                        {isLoading ? (
+                            <div className="py-12 text-center text-slate-400 text-xs">
+                                실시간 서버 데이터 불러오는 중...
+                            </div>
+                        ) : filteredSubmissions.length === 0 ? (
+                            <div className="py-12 text-center text-slate-400 text-xs">
+                                선택하신 주차({currentWeekInfo?.label.split('(')[0].trim()})에 등록된 제출 내역이 없습니다.
+                            </div>
+                        ) : (
+                            <div className="space-y-3">
+                                {filteredSubmissions.map((item) => (
+                                    <div key={item.id} className="p-4 rounded-xl border border-slate-200/80 bg-slate-50/50 space-y-2">
+                                        <div className="flex items-center justify-between">
+                                            <div className="flex items-center space-x-2">
+                                                <span className="font-bold text-slate-800 text-base">{item.name}</span>
+                                                <span className="text-xs bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded-md font-bold border border-indigo-100">
+                                                    {item.team}
+                                                </span>
+                                            </div>
+                                            <div className="flex items-center space-x-1.5">
+                                                <button
+                                                    onClick={() => handleEditStart(item)}
+                                                    className="text-xs font-bold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 px-2.5 py-1 rounded-md transition-all"
+                                                >
+                                                    ✏️ 수정
+                                                </button>
+                                                {isAdminLoggedIn && (
+                                                    <button
+                                                        onClick={() => handleDelete(item.id)}
+                                                        className="text-slate-400 hover:text-rose-600 text-xs font-bold px-2 py-1 bg-white border border-slate-200 rounded-md shadow-sm transition-all"
+                                                    >
+                                                        삭제
+                                                    </button>
+                                                )}
+                                            </div>
+                                        </div>
+
+                                        <div className="flex flex-wrap gap-2 text-xs">
+                                            <div>
+                                                <span className="text-slate-500 mr-1">토요일:</span>
+                                                <span className={`px-2 py-0.5 rounded-full border font-bold ${getBadgeStyle(item.satStatus)}`}>
+                                                    {item.satStatus}
+                                                </span>
+                                            </div>
+                                            <div>
+                                                <span className="text-slate-500 mr-1">일요일:</span>
+                                                <span className={`px-2 py-0.5 rounded-full border font-bold ${getBadgeStyle(item.sunStatus)}`}>
+                                                    {item.sunStatus}
+                                                </span>
+                                            </div>
+                                        </div>
+
+                                        {/* 사유 공개/비공개 영역 */}
+                                        <div className="pt-1">
+                                            {isAdminLoggedIn ? (
+                                                <div className="bg-indigo-50/80 border border-indigo-100 rounded-lg p-2.5 text-xs text-slate-700 mt-1">
+                                                    <span className="font-bold text-indigo-900 block mb-0.5">📝 제출 사유 (교사 열람 전용):</span>
+                                                    {item.reason ? (
+                                                        <p className="whitespace-pre-wrap leading-relaxed font-medium">{item.reason}</p>
+                                                    ) : (
+                                                        <span className="text-slate-400 italic">작성된 사유가 없습니다.</span>
+                                                    )}
+                                                </div>
+                                            ) : (
+                                                <div className="flex items-center space-x-1 text-xs text-slate-400 italic bg-slate-100/70 p-2 rounded-lg border border-slate-200/50">
+                                                    <span>🔒</span>
+                                                    <span>사유는 교사 비밀번호 인증 시에만 공개됩니다.</span>
+                                                </div>
+                                            )}
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+
+                    {/* 교사 로그인 모달 */}
+                    {showAdminModal && (
+                        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+                            <div className="bg-white rounded-2xl max-w-xs w-full p-6 shadow-xl border border-slate-100 space-y-4">
+                                <div className="text-center space-y-1">
+                                    <div className="w-12 h-12 bg-indigo-100 text-indigo-600 rounded-full flex items-center justify-center mx-auto mb-2 text-xl">
+                                        🔐
+                                    </div>
+                                    <h3 className="font-bold text-slate-800 text-base">교사 인증 로그인</h3>
+                                    <p className="text-xs text-slate-500">교사 비밀번호를 입력해주세요.</p>
+                                </div>
+
+                                <form onSubmit={handleAdminLogin} className="space-y-3">
+                                    <div>
+                                        <input
+                                            type="password"
+                                            placeholder="비밀번호 입력"
+                                            value={adminPasswordInput}
+                                            onChange={(e) => {
+                                                setAdminPasswordInput(e.target.value);
+                                                setPasswordError(false);
+                                            }}
+                                            className="w-full px-4 py-2.5 text-center text-lg tracking-widest font-bold rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-slate-50"
+                                            autoFocus
+                                        />
+                                        {passwordError && (
+                                            <p className="text-xs text-rose-500 text-center mt-1 font-bold">
+                                                비밀번호가 일치하지 않습니다.
+                                            </p>
+                                        )}
+                                    </div>
+
+                                    <div className="flex space-x-2">
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                setShowAdminModal(false);
+                                                setPasswordError(false);
+                                                setAdminPasswordInput('');
+                                            }}
+                                            className="w-1/2 py-2.5 rounded-xl border border-slate-200 text-slate-600 text-xs font-bold hover:bg-slate-50"
+                                        >
+                                            취소
+                                        </button>
+                                        <button
+                                            type="submit"
+                                            className="w-1/2 py-2.5 rounded-xl bg-indigo-600 text-white text-xs font-bold hover:bg-indigo-700 shadow-sm"
+                                        >
+                                            확인
+                                        </button>
+                                    </div>
+                                </form>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* 교사 비밀번호 변경 모달 */}
+                    {showPwChangeModal && (
+                        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+                            <div className="bg-white rounded-2xl max-w-xs w-full p-6 shadow-xl border border-slate-100 space-y-4">
+                                <div className="text-center space-y-1">
+                                    <div className="w-12 h-12 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center mx-auto mb-2 text-xl">
+                                        🔑
+                                    </div>
+                                    <h3 className="font-bold text-slate-800 text-base">비밀번호 변경</h3>
+                                    <p className="text-xs text-slate-500">새롭게 사용할 교사 비밀번호를 설정합니다.</p>
+                                </div>
+
+                                <form onSubmit={handleChangePassword} className="space-y-3">
+                                    <div>
+                                        <input
+                                            type="text"
+                                            placeholder="새 비밀번호 입력 (4자리 이상)"
+                                            value={newPasswordInput}
+                                            onChange={(e) => setNewPasswordInput(e.target.value)}
+                                            className="w-full px-4 py-2.5 text-center text-base font-bold rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-slate-50"
+                                            autoFocus
+                                        />
+                                    </div>
+
+                                    <div className="flex space-x-2">
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                setShowPwChangeModal(false);
+                                                setNewPasswordInput('');
+                                            }}
+                                            className="w-1/2 py-2.5 rounded-xl border border-slate-200 text-slate-600 text-xs font-bold hover:bg-slate-50"
+                                        >
+                                            취소
+                                        </button>
+                                        <button
+                                            type="submit"
+                                            className="w-1/2 py-2.5 rounded-xl bg-emerald-600 text-white text-xs font-bold hover:bg-emerald-700 shadow-sm"
+                                        >
+                                            변경 저장
+                                        </button>
+                                    </div>
+                                </form>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        ReactDOM.render(<App />, document.getElementById('root'));
+    </script>
+</body>
+</html>
